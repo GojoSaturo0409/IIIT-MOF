@@ -1,4 +1,6 @@
-# MAE3D — Masked Autoencoder for 3D Voxelized MOFs
+# Yet to do : clean up the codes
+
+## MAE3D — Masked Autoencoder for 3D Voxelized MOFs
 
 This repository contains tools to voxelize CIFs (Metal–Organic Frameworks) and pretrain / fine‑tune a 3D masked autoencoder (MAE) on multi‑channel voxel grids. The codebase focuses on reproducible training, DDP robustness, and convenient test-time CSV output.
 
