@@ -1,31 +1,4 @@
-#!/usr/bin/env python3
-"""
-voxelize_cifs_publishable_fixed.py
-
-Robust, publication-ready voxelizer for CIF -> multi-channel 3D voxel grids.
-
-Key fixes vs original:
- - lattice-aware fractional mapping (default) with optional cartesian mode
- - robust handling of species/Specie/Element atomic number lookups
- - trilinear splatting for charge channel (consistent with other channels)
- - optional per-atom gaussian splatting (enabled with --per-atom-gauss)
- - case-insensitive CIF scanning
- - save `channels` inside .npz alongside `vox`
- - save pymatgen package version in metadata
- - idempotent logging setup (avoids double handlers)
- - added CLI flags for map-mode and per-atom gaussian, with performance notes
- - added small unit-test helper `run_sanity_test()` when run with `--test`
-
-Usage example:
-  python voxelize_cifs_publishable_fixed.py --cif-dir repeat_cifs --out-dir voxels --grid 64 --Lmin 35.0
-
-Dependencies:
-  pip install numpy scipy pymatgen tqdm
-
-"""
-
 from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -44,14 +17,14 @@ from pymatgen.core.periodic_table import Element
 from scipy.ndimage import gaussian_filter
 from tqdm import tqdm
 
-# -------------------------- Defaults & constants -------------------------
+
 DEFAULT_ELEM_CHANNELS = ["C", "O", "N", "H"]
 METAL_Z_CUTOFF = 21
 
-# -------------------------- Helpers -------------------------------------
+
 
 def setup_logger(verbose: bool = False):
-    """Idempotent logger setup."""
+    
     level = logging.DEBUG if verbose else logging.INFO
     logger = logging.getLogger()
     if not logger.handlers:
@@ -63,7 +36,7 @@ def setup_logger(verbose: bool = False):
 
 
 def build_supercell(struct: Structure, Lmin: float) -> Structure:
-    """Expand the structure so each lattice vector length >= Lmin."""
+    
     a, b, c = struct.lattice.abc
     na = max(1, int(np.ceil(Lmin / a)))
     nb = max(1, int(np.ceil(Lmin / b)))
@@ -75,7 +48,7 @@ def build_supercell(struct: Structure, Lmin: float) -> Structure:
 
 
 def extract_site_charge(site) -> float:
-    """Robustly extract a partial charge for a site if present; otherwise 0.0."""
+    
     props = getattr(site, "properties", {}) or {}
     keys = (
         "partial_charge",
@@ -94,7 +67,7 @@ def extract_site_charge(site) -> float:
                     return float(props[k][0])
                 except Exception:
                     pass
-    # try species properties
+    
     try:
         sp = site.specie
         if hasattr(sp, "properties") and sp.properties:
@@ -110,9 +83,7 @@ def extract_site_charge(site) -> float:
 
 
 def get_species_and_occupancy(site) -> List[Tuple[object, float]]:
-    """Return list of tuples (Specie/Element, occupancy) for the site.
-    Handles both ordered sites (site.specie) and disordered (site.species.items()).
-    """
+    
     try:
         sp = site.specie
         return [(sp, 1.0)]
@@ -127,14 +98,13 @@ def get_species_and_occupancy(site) -> List[Tuple[object, float]]:
 
 
 def _atomic_number_from_specie(sp) -> int:
-    """Robust atomic number lookup from a pymatgen Specie/Element-like object."""
-    # common attributes: Z, atomic_number
+    
     Z = getattr(sp, "Z", None)
     if Z is None:
         Z = getattr(sp, "atomic_number", None)
     try:
         if Z is None and hasattr(sp, "__str__"):
-            # fallback: try Element(sp.symbol) if possible
+            
             sym = getattr(sp, "symbol", None) or str(sp)
             try:
                 el = Element(sym)
@@ -147,15 +117,15 @@ def _atomic_number_from_specie(sp) -> int:
 
 
 def _symbol_from_specie(sp) -> str:
-    # prefer symbol attribute, else str()
+    
     return getattr(sp, "symbol", None) or str(sp)
 
 
 def get_symbol_Z_and_occupancy(site) -> Tuple[str, int, float]:
-    """Return (symbol, Z, occupancy) choosing the highest-occupancy specie when disordered."""
+    
     spp = get_species_and_occupancy(site)
     if len(spp) == 0:
-        # fallback: try site.specie
+        
         try:
             sp = site.specie
             sym = _symbol_from_specie(sp)
