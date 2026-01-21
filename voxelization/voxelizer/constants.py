@@ -1,0 +1,7 @@
+# mof_voxelizer/constants.py
+
+DEFAULT_ELEM_CHANNELS = ["C", "O", "N", "H"]
+METAL_Z_CUTOFF = 21
+DEFAULT_GRID_SIZE = 64
+DEFAULT_LMIN = 35.0
+DEFAULT_SIGMA = 0.75

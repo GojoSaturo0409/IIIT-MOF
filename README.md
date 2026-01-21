@@ -1,116 +1,242 @@
-# Yet to do : clean up the codes
+# Self-Supervised 3D Voxel Masked Autoencoder Representations for CO₂ Working Capacity Prediction in Metal–Organic Frameworks
 
-## MAE3D — Masked Autoencoder for 3D Voxelized MOFs
+**IIIT-MOF** is an end-to-end deep learning pipeline for representation learning and property prediction in Metal–Organic Frameworks (MOFs). The framework converts raw crystallographic data (CIF) into multi-channel 3D voxel grids, trains 3D Masked Autoencoders for self-supervised and supervised learning, and provides a comprehensive suite of post-hoc structural and statistical analysis tools.
 
-This repository contains tools to voxelize CIFs (Metal–Organic Frameworks) and pretrain / fine‑tune a 3D masked autoencoder (MAE) on multi‑channel voxel grids. The codebase focuses on reproducible training, DDP robustness, and convenient test-time CSV output.
-
----
-
-## Repository structure
-
-* `train.py` — Main training & fine‑tuning script (DDP‑aware). Produces per‑epoch checkpoints (`mae_epoch{EPOCH}.pt`) and a best model (`mae_best.pt`). Also saves test predictions to CSV (`test_predictions.csv`).
-
-* `voxel.py` — Robust publication‑quality voxelizer: CIF → multi‑channel 3D voxel grids (`*_vox.npz`) + metadata (`*_meta.json`). Supports lattice‑aware fractional mapping, trilinear splatting, per‑atom gaussian splatting, optional charge channel, and multiple normalization modes.
-
-* `mae_best.pt` — (example or user‑provided) trained checkpoint. Place in an `out_dir` or specify path via `--resume` when resuming / evaluating.
-
-* `README.md` — (this file)
+This repository is designed for researchers working at the intersection of materials science and deep learning, particularly in adsorption, gas storage, and structure–property modeling of porous materials.
 
 ---
 
-## Quick start
+## Features
 
-### 1 Install dependencies
+* **CIF → 3D Voxel Pipeline**
 
-A minimal working environment:
+  * Fractional and Cartesian lattice-aware mapping
+  * Gaussian splatting and trilinear interpolation
+  * Element-specific channels and partial charge support
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -U pip
-pip install torch torchvision torchaudio  # install the correct CUDA build for your machine
-pip install numpy scipy pandas tqdm pymatgen
+* **3D Masked Autoencoder**
+
+  * Vision Transformer (ViT)-based architecture for volumetric data
+  * Self-supervised pre-training and supervised fine-tuning
+  * Distributed Data Parallel (DDP) and Automatic Mixed Precision (AMP)
+
+* **Post-hoc Analysis & Interpretability**
+
+  * Regression metrics and residual analysis
+  * Structural feature extraction (40+ voxel-derived descriptors)
+  * Statistical testing (Cohen’s d, Mann–Whitney U, bootstrapped CIs)
+
+---
+
+## Project Structure
+
+```text
+.
+├── analysis
+│   ├── main.py              # CLI for analysis subcommands
+│   └── mof_analysis
+│       ├── __init__.py
+│       ├── plotting.py    # Visualization and plotting utilities
+│       ├── stats.py       # Statistical tests and metrics
+│       ├── utils.py      # Shared helpers
+│       ├── voxels.py    # Voxel feature extraction
+│       └── workflows.py # End-to-end analysis workflows
+├── mae_best.pt           # Pre-trained model checkpoint
+├── README.md
+├── training
+│   ├── data.py          # Dataset and dataloader logic
+│   ├── engine.py       # Training/validation loops
+│   ├── model.py        # Masked Autoencoder / ViT architecture
+│   ├── train.py        # Training and fine-tuning entry point
+│   └── utils.py       # Training utilities
+└── voxelization
+    ├── main.py         # Voxelization CLI
+    └── voxelizer
+        ├── chemistry.py  # Element and charge handling
+        ├── constants.py  # Physical and numerical constants
+        ├── core.py       # Core voxelization logic
+        ├── grid.py       # Lattice/grid construction
+        ├── __init__.py
+        ├── io_utils.py   # CIF and file I/O
+        ├── pipeline.py  # End-to-end voxelization pipeline
+        └── utils.py     # Shared helpers
 ```
 
-> `pymatgen` is required for CIF parsing in `voxel.py`. Use your system CUDA‑compatible `torch` build.
+---
 
-### 2 Voxelize CIFs
+## Installation
 
-Example: create voxel files (default grid 64)
+### Requirements
+
+* Python **3.8+**
+* PyTorch **1.12+** (CUDA optional but recommended)
+* Linux/macOS recommended for large-scale training
+
+### Setup
+
+Clone the repository:
 
 ```bash
-python voxel.py --cif-dir repeat_cifs --out-dir voxels --grid 64 --Lmin 35.0 --include-charge
+git clone https://github.com/your-username/IIIT-MOF.git
+cd IIIT-MOF
 ```
 
-Options of note:
-
-* `--grid` grid size `G` (voxel shape = `(C,G,G,G)`)
-* `--map-mode` `fractional` (lattice aware, default) or `cartesian`
-* `--per-atom-gauss` higher fidelity, slower
-* `--normalize` normalization mode (`none`, `per_channel_max`, `global_max`, `sum_normalize`)
-* `--save-torch` also save `.pt` torch tensors
-
-Output files follow the naming convention: `<cif_stem>_vox.npz` and `<cif_stem>_meta.json`.
-
-### 3 Train / Fine‑tune
-
-**Pretraining (MAE objective):**
+Install dependencies:
 
 ```bash
-python train.py --vox-dir voxels --out-dir mae_runs --patch 4 --batch 8 --epochs 200 --lr 3e-4
+# Install PyTorch (adjust CUDA version as needed)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# Scientific stack
+pip install numpy pandas scipy matplotlib scikit-learn pymatgen tqdm
 ```
 
-**Fine‑tuning (regression head):**
+---
+
+## Usage Guide
+
+The workflow is divided into three stages:
+
+1. **Voxelization** – Convert CIF files into multi-channel 3D voxel grids
+2. **Training** – Pre-train or fine-tune a 3D Masked Autoencoder
+3. **Analysis** – Evaluate predictions and interpret structural features
+
+---
+
+## 1. Voxelization
+
+Convert `.cif` files into multi-channel 3D voxel grids stored as `.npz` tensors.
+
+### Basic Usage
 
 ```bash
-python train.py --vox-dir voxels --out-dir mae_runs_ft --patch 4 --batch 8 --epochs 100 \
-  --finetune --targets-csv targets.csv --normalize-target --ft-hidden 256 --reg-loss l1
+python voxelization/main.py \
+    --cif-dir ./data/cifs \
+    --out-dir ./data/voxels \
+    --grid 64 \
+    --elem-channels "C,O,N,H"
 ```
 
-Important CLI flags (see `train.py` for full list):
+### Advanced Usage
 
-* `--patch` patch size (must divide grid G)
-* `--finetune` enables regression head and supervised training
-* `--targets-csv` CSV with `filename` and target column (default `wc_mmolg`) for regression
-* `--normalize-target` normalize targets using training set mean/std
-* `--distributed` enable DDP (NCCL) — a `dist_timeout_seconds` argument is available
-* `--resume` path to a checkpoint to resume from (or `mae_best.pt`)
+Enable partial charges and per-atom Gaussian density splatting:
 
-Checkpoints saved to `--out-dir`:
+```bash
+python voxelization/main.py \
+    --cif-dir ./data/cifs \
+    --out-dir ./data/voxels \
+    --include-charge \
+    --per-atom-gauss \
+    --overwrite
+```
 
-* `mae_epoch{E}.pt` — per epoch
-* `mae_best.pt` — best model (by validation loss)
+### Output
 
-**Test predictions:** After training (if a test split exists), predictions are written to
-`<out-dir>/test_predictions.csv` with columns: `filename`, `prediction`, `target`, `is_valid`.
+Each MOF is saved as a compressed `.npz` file containing:
 
----
-
-## File / format conventions
-
-* Voxel file: `.npz` with `vox` (float32 ndarray of shape `(C,G,G,G)`) and `channels` stored alongside.
-* Metadata: `*_meta.json` contains `channels`, `grid`, `box_size_ang`, `pymatgen` version, timestamp, etc.
-* Targets CSV: must contain columns matching `--filename-col` (default `filename`) and `--target-col` (default `wc_mmolg`). Filenames will be normalized to end with `.cif` when matching.
+* Atomic density channel
+* Metal–organic distinction channel
+* Element-specific channels
+* (Optional) Partial charge channel
 
 ---
 
-## Tips & Troubleshooting
+## 2. Training
 
-* Ensure `--patch` divides `G`. Example: `G=64`, `--patch 4` ⇒ `(64/4)^3` patches.
-* If using DDP / NCCL, set appropriate environment vars and use `torch.distributed.launch`/`torchrun` with `LOCAL_RANK` set. The training script accepts `--distributed` and increases NCCL timeout by default.
-* If all targets are `NaN` in a batch during fine‑tuning, the script will raise; prefilter your CSV or use `is_valid` handling.
-* To resume finetuning but reset early stopping patience, use `--resume` together with `--reset-patience` and `--finetune`.
+Train a 3D Masked Autoencoder for representation learning or downstream property prediction.
+
+### Self-Supervised Pre-Training
+
+```bash
+python training/train.py \
+    --vox-dir ./data/voxels \
+    --out-dir ./checkpoints \
+    --patch 8 \
+    --mask-ratio 0.75 \
+    --batch-size 8 \
+    --epochs 200
+```
+
+### Supervised Fine-Tuning (Property Prediction)
+
+```bash
+python training/train.py \
+    --vox-dir ./data/voxels \
+    --out-dir ./checkpoints_ft \
+    --patch 8 \
+    --finetune \
+    --targets-csv ./data/properties.csv \
+    --target-col "wc_mmolg" \
+    --resume ./mae_best.pt
+```
+
+### Notes
+
+* Supports **multi-GPU training** via PyTorch DDP
+* Uses **Automatic Mixed Precision (AMP)** for faster training
+* Saves **per-epoch checkpoints** and test predictions to CSV
 
 ---
 
-## Reproducibility & Seeds
+## 3. Analysis
 
-Use `--seed` to set RNG seeds used across numpy, python `random`, and torch. The script sets `torch.backends.cudnn.benchmark = True` for performance; adjust for strict determinism if needed.
+Evaluate model performance and interpret structural differences between high- and low-performing MOFs.
+
+### Analyze Predictions
+
+Generates regression metrics, residual plots, and bin-wise statistics:
+
+```bash
+python analysis/main.py analyze-preds \
+    --csv ./checkpoints_ft/test_predictions.csv \
+    --out-dir ./results/prediction_analysis
+```
+
+### Structural Analysis (Best vs Worst MOFs)
+
+Extracts and compares voxel-level descriptors for top and bottom performers:
+
+```bash
+python analysis/main.py analyze-struct \
+    --csv ./checkpoints_ft/test_predictions.csv \
+    --cif-root ./data/cifs \
+    --voxel-script ./voxelization/main.py \
+    --out-dir ./results/structural_analysis \
+    --top-k 50
+```
 
 ---
 
-## License & Citation
+## Module Overview
 
-This repository is provided under the MIT License. If you use these tools in publications, please cite the authors and mention the voxelization and MAE training pipeline in your methods.
+### `voxelization/`
+
+Handles translation from crystallographic structures to tensor representations:
+
+* Fractional and Cartesian coordinate mapping
+* Periodic boundary handling
+* Gaussian splatting and trilinear interpolation
+* Element and charge-aware channel construction
+
+### `training/`
+
+PyTorch implementation of a 3D Vision Transformer with Masked Autoencoder logic:
+
+* 3D patch embedding and volumetric attention
+* Self-supervised reconstruction objective
+* Supervised regression head for property prediction
+* DDP and AMP support
+
+### `analysis/`
+
+Interpretability and evaluation toolkit:
+
+* **Statistics:** RMSE, MAE, R², Cohen’s d, Mann–Whitney U, bootstrapped CIs
+* **Visualization:** Regression plots, residual histograms, feature importance bars
+* **Structure:** 40+ voxel-derived geometric and chemical descriptors
 
 ---
+
+## Citation
+
+If you use this code in your research, please cite this work.
