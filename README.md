@@ -1,8 +1,27 @@
 # Self-Supervised 3D Voxel Masked Autoencoder Representations for CO₂ Working Capacity Prediction in Metal–Organic Frameworks
 
-**IIIT-MOF** is an end-to-end deep learning pipeline for representation learning and property prediction in Metal–Organic Frameworks (MOFs). The framework converts raw crystallographic data (CIF) into multi-channel 3D voxel grids, trains 3D Masked Autoencoders for self-supervised and supervised learning, and provides a comprehensive suite of post-hoc structural and statistical analysis tools.
+**IIIT-MOF** is an end-to-end deep learning pipeline for representation learning and property prediction in Metal–Organic Frameworks (MOFs). The framework converts raw crystallographic data (CIF) into multi-channel 3D voxel grids, trains 3D Masked Autoencoders for self-supervised and supervised learning, and provides post-hoc structural and statistical analysis tools for interpreting structure–property relationships.
 
 This repository is designed for researchers working at the intersection of materials science and deep learning, particularly in adsorption, gas storage, and structure–property modeling of porous materials.
+
+---
+
+## Repository Structure
+
+This repository is organized into three main functional components: voxelization, training, and analysis.
+
+```text
+.
+├── analysis
+│   ├── analysis.py        # Prediction analysis and structural comparison workflows
+│   └── stat_analysis.py # Statistical metrics and hypothesis testing
+├── mae_best.pt          # Pre-trained / fine-tuned model checkpoint
+├── README.md
+├── training
+│   └── train.py        # Training and fine-tuning entry point (MAE + regression)
+└── voxelization
+    └── voxel.py       # CIF → multi-channel 3D voxelization pipeline
+```
 
 ---
 
@@ -12,55 +31,19 @@ This repository is designed for researchers working at the intersection of mater
 
   * Fractional and Cartesian lattice-aware mapping
   * Gaussian splatting and trilinear interpolation
-  * Element-specific channels and partial charge support
+  * Element-specific channels and optional partial charge support
 
 * **3D Masked Autoencoder**
 
   * Vision Transformer (ViT)-based architecture for volumetric data
   * Self-supervised pre-training and supervised fine-tuning
-  * Distributed Data Parallel (DDP) and Automatic Mixed Precision (AMP)
+  * Support for checkpoint loading and resuming
 
 * **Post-hoc Analysis & Interpretability**
 
-  * Regression metrics and residual analysis
-  * Structural feature extraction (40+ voxel-derived descriptors)
-  * Statistical testing (Cohen’s d, Mann–Whitney U, bootstrapped CIs)
-
----
-
-## Project Structure
-
-```text
-.
-├── analysis
-│   ├── main.py              # CLI for analysis subcommands
-│   └── mof_analysis
-│       ├── __init__.py
-│       ├── plotting.py    # Visualization and plotting utilities
-│       ├── stats.py       # Statistical tests and metrics
-│       ├── utils.py      # Shared helpers
-│       ├── voxels.py    # Voxel feature extraction
-│       └── workflows.py # End-to-end analysis workflows
-├── mae_best.pt           # Pre-trained model checkpoint
-├── README.md
-├── training
-│   ├── data.py          # Dataset and dataloader logic
-│   ├── engine.py       # Training/validation loops
-│   ├── model.py        # Masked Autoencoder / ViT architecture
-│   ├── train.py        # Training and fine-tuning entry point
-│   └── utils.py       # Training utilities
-└── voxelization
-    ├── main.py         # Voxelization CLI
-    └── voxelizer
-        ├── chemistry.py  # Element and charge handling
-        ├── constants.py  # Physical and numerical constants
-        ├── core.py       # Core voxelization logic
-        ├── grid.py       # Lattice/grid construction
-        ├── __init__.py
-        ├── io_utils.py   # CIF and file I/O
-        ├── pipeline.py  # End-to-end voxelization pipeline
-        └── utils.py     # Shared helpers
-```
+  * Regression metrics (RMSE, MAE, R²)
+  * Best vs. worst MOF structural comparison
+  * Statistical testing (Cohen’s d, Mann–Whitney U, bootstrapped confidence intervals)
 
 ---
 
@@ -69,8 +52,8 @@ This repository is designed for researchers working at the intersection of mater
 ### Requirements
 
 * Python **3.8+**
-* PyTorch **1.12+** (CUDA optional but recommended)
-* Linux/macOS recommended for large-scale training
+* PyTorch **1.12+** (CUDA optional but recommended for training)
+* Linux/macOS recommended for large-scale experiments
 
 ### Setup
 
@@ -105,12 +88,12 @@ The workflow is divided into three stages:
 
 ## 1. Voxelization
 
-Convert `.cif` files into multi-channel 3D voxel grids stored as `.npz` tensors.
+Convert `.cif` files into multi-channel 3D voxel grids stored as compressed `.npz` tensors.
 
 ### Basic Usage
 
 ```bash
-python voxelization/main.py \
+python voxelization/voxel.py \
     --cif-dir ./data/cifs \
     --out-dir ./data/voxels \
     --grid 64 \
@@ -122,7 +105,7 @@ python voxelization/main.py \
 Enable partial charges and per-atom Gaussian density splatting:
 
 ```bash
-python voxelization/main.py \
+python voxelization/voxel.py \
     --cif-dir ./data/cifs \
     --out-dir ./data/voxels \
     --include-charge \
@@ -134,7 +117,7 @@ python voxelization/main.py \
 
 Each MOF is saved as a compressed `.npz` file containing:
 
-* Atomic density channel
+* Total atomic density channel
 * Metal–organic distinction channel
 * Element-specific channels
 * (Optional) Partial charge channel
@@ -172,9 +155,9 @@ python training/train.py \
 
 ### Notes
 
-* Supports **multi-GPU training** via PyTorch DDP
-* Uses **Automatic Mixed Precision (AMP)** for faster training
-* Saves **per-epoch checkpoints** and test predictions to CSV
+* Supports **checkpoint loading and resuming**
+* Compatible with **Automatic Mixed Precision (AMP)** if enabled in the training script
+* Saves **test predictions to CSV** for downstream analysis
 
 ---
 
@@ -187,7 +170,7 @@ Evaluate model performance and interpret structural differences between high- an
 Generates regression metrics, residual plots, and bin-wise statistics:
 
 ```bash
-python analysis/main.py analyze-preds \
+python analysis/analysis.py \
     --csv ./checkpoints_ft/test_predictions.csv \
     --out-dir ./results/prediction_analysis
 ```
@@ -197,10 +180,10 @@ python analysis/main.py analyze-preds \
 Extracts and compares voxel-level descriptors for top and bottom performers:
 
 ```bash
-python analysis/main.py analyze-struct \
+python analysis/stat_analysis.py \
     --csv ./checkpoints_ft/test_predictions.csv \
     --cif-root ./data/cifs \
-    --voxel-script ./voxelization/main.py \
+    --voxel-script ./voxelization/voxel.py \
     --out-dir ./results/structural_analysis \
     --top-k 50
 ```
@@ -220,23 +203,22 @@ Handles translation from crystallographic structures to tensor representations:
 
 ### `training/`
 
-PyTorch implementation of a 3D Vision Transformer with Masked Autoencoder logic:
+PyTorch implementation of a 3D Masked Autoencoder:
 
 * 3D patch embedding and volumetric attention
 * Self-supervised reconstruction objective
 * Supervised regression head for property prediction
-* DDP and AMP support
 
 ### `analysis/`
 
 Interpretability and evaluation toolkit:
 
-* **Statistics:** RMSE, MAE, R², Cohen’s d, Mann–Whitney U, bootstrapped CIs
+* **Statistics:** RMSE, MAE, R², Cohen’s d, Mann–Whitney U, bootstrapped confidence intervals
 * **Visualization:** Regression plots, residual histograms, feature importance bars
-* **Structure:** 40+ voxel-derived geometric and chemical descriptors
+* **Structure:** Voxel-derived geometric and chemical descriptors
 
 ---
 
 ## Citation
 
-If you use this code in your research, please cite this work.
+If you use this code in your research, please cite this work. 
