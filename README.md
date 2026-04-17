@@ -14,13 +14,22 @@ This repository is organized into three main functional components: voxelization
 .
 ├── analysis
 │   ├── analysis.py        # Prediction analysis and structural comparison workflows
-│   └── stat_analysis.py # Statistical metrics and hypothesis testing
-├── mae_best.pt          # Pre-trained / fine-tuned model checkpoint
-├── README.md
+│   └── stat_analysis.py   # Statistical metrics and hypothesis testing
+├── attribution
+│   └── attribute_analysis.py # Post-hoc feature attribution for model explainability
+├── graph_benchmarking
+│   └── calc.py            # Comparative benchmarks with graph architectures
+├── pretraining_contri
+│   └── line_plots.py      # Pre-training vs. fine-tuning ablation studies
+├── voxel_ablation
+│   └── line_plots.py      # Grid resolution impact analysis (32, 64, 96)
+├── voxelization
+│   └── voxel.py           # CIF → multi-channel 3D voxelization pipeline
 ├── training
-│   └── train.py        # Training and fine-tuning entry point (MAE + regression)
-└── voxelization
-    └── voxel.py       # CIF → multi-channel 3D voxelization pipeline
+│   └── train.py           # Training and fine-tuning entry point (MAE + regression)
+├── splits                 # Experimental data splits (1%, 3%, 5%, 10%, 20%)
+├── mae_best.pt            # Pre-trained / fine-tuned model checkpoint
+└── README.md
 ```
 
 ---
@@ -216,6 +225,26 @@ Interpretability and evaluation toolkit:
 * **Statistics:** RMSE, MAE, R², Cohen’s d, Mann–Whitney U, bootstrapped confidence intervals
 * **Visualization:** Regression plots, residual histograms, feature importance bars
 * **Structure:** Voxel-derived geometric and chemical descriptors
+
+### `attribution/`
+
+* **Explainability:** Post-hoc feature attribution using Integrated Gradients or similar techniques to identify which voxel regions contribute most to property predictions.
+
+### `graph_benchmarking/`
+
+* **Benchmarks:** Scripts for comparing the 3D Voxel MAE performance against state-of-the-art graph-based models like CGCNN and GCNN.
+
+### `pretraining_contri/`
+
+* **Ablation Studies:** Analysis of how self-supervised pre-training impacts downstream regression performance compared to training from scratch or fine-tuning only.
+
+### `voxel_ablation/`
+
+* **Resolution Study:** Systematic evaluation of model performance across different voxel grid sizes (e.g., 32³, 64³, 96³) to determine optimal discretization parameters.
+
+### `splits/`
+
+* **Low-Data Regime:** Standardized directory for 1%, 3%, 5%, 10%, and 20% training data splits, used to evaluate model robustness and learning efficiency in data-scarce scenarios.
 
 ---
 
