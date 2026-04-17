@@ -4,8 +4,8 @@ import warnings
 from itertools import combinations
 from pathlib import Path
 
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 from matplotlib.colors import LogNorm
@@ -324,12 +324,10 @@ def safe_corrs(y_true, y_pred):
     return pearson_r, pearson_p, spearman_r, spearman_p
 
 
-def plot_density_parity(y_true, y_pred, outpath, title_prefix="", n_bins=80, rolling_window=200):
+def plot_density_parity(y_true, y_pred, outpath, title_prefix="", bins=160):
     """
-    Density-based parity plot that avoids overplotting.
-    Panel (a): 2D histogram parity plot with log-scaled density.
-    Panel (b): Rolling-window density map, sorted by target.
-    Panel (c): Residual distribution with histogram + KDE.
+    Single-panel parity plot rendered as a 2D histogram heatmap.
+    This avoids marker overplotting and makes density near the identity line visible.
     """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
@@ -347,321 +345,58 @@ def plot_density_parity(y_true, y_pred, outpath, title_prefix="", n_bins=80, rol
     r2 = float(r2_score(y_true, y_pred)) if len(y_true) > 1 else np.nan
     pr, _, sp, _ = safe_corrs(y_true, y_pred)
 
-    lim_lo = 0.0
-    lim_hi = float(np.nanpercentile(np.concatenate([y_true, y_pred]), 99.5)) * 1.05
-    lim_hi = max(lim_hi, 0.5)
-    LIMS = (lim_lo, lim_hi)
+    all_vals = np.concatenate([y_true, y_pred])
+    lo = float(np.nanpercentile(all_vals, 0.5))
+    hi = float(np.nanpercentile(all_vals, 99.5))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo = float(np.nanmin(all_vals))
+        hi = float(np.nanmax(all_vals))
 
-    fig = plt.figure(figsize=(13, 5.2), dpi=180)
-    fig.patch.set_facecolor("white")
-    gs = gridspec.GridSpec(
-        1, 3, figure=fig,
-        left=0.07, right=0.97, bottom=0.13, top=0.91, wspace=0.40
+    pad = 0.05 * (hi - lo if hi > lo else 1.0)
+    lo -= pad
+    hi += pad
+
+    fig, ax = plt.subplots(figsize=(7.4, 6.2), dpi=200, layout="constrained")
+
+    h, xedges, yedges = np.histogram2d(
+        y_true,
+        y_pred,
+        bins=bins,
+        range=[[lo, hi], [lo, hi]],
     )
-    ax1 = fig.add_subplot(gs[0])
-    ax2 = fig.add_subplot(gs[1])
-    ax3 = fig.add_subplot(gs[2])
-
-    # (a) 2D histogram parity plot
-    h, xe, ye = np.histogram2d(y_true, y_pred, bins=n_bins, range=[LIMS, LIMS])
     h = h.T
 
-    cmap1 = plt.cm.YlOrRd.copy()
-    cmap1.set_bad("white")
+    cmap = plt.colormaps["plasma"].copy()
+    cmap = cmap.with_extremes(bad=cmap(0))
+
+    hm = np.ma.masked_where(h == 0, h)
 
     if np.max(h) > 0:
-        hm = np.ma.masked_where(h == 0, h)
-        im1 = ax1.pcolormesh(
-            xe, ye, hm,
-            norm=LogNorm(vmin=1, vmax=max(int(h.max()), 1)),
-            cmap=cmap1,
-            rasterized=True,
+        pcm = ax.pcolormesh(
+            xedges,
+            yedges,
+            hm,
+            cmap=cmap,
+            norm=LogNorm(vmin=1, vmax=max(int(np.max(h)), 1)),
             shading="auto",
-        )
-        cb1 = fig.colorbar(im1, ax=ax1, pad=0.02, fraction=0.046)
-        cb1.set_label("Count (log scale)", fontsize=8)
-        cb1.ax.tick_params(labelsize=7)
-
-    ax1.plot(LIMS, LIMS, "k--", lw=1.2, label="Identity")
-    ax1.set_xlim(LIMS)
-    ax1.set_ylim(LIMS)
-    ax1.set_xlabel("Target working capacity (mmol g$^{-1}$)", fontsize=9)
-    ax1.set_ylabel("Predicted working capacity (mmol g$^{-1}$)", fontsize=9)
-    ax1.set_title(f"({title_prefix}a) Parity — 2D density histogram", fontsize=9, fontweight="bold")
-    ax1.tick_params(labelsize=8)
-    ax1.grid(True, lw=0.4, alpha=0.4)
-
-    stats_str = (
-        f"$R^2$={r2:.4f}\n"
-        f"MAE={mae:.4f} mmol g$^{{-1}}$\n"
-        f"RMSE={rmse:.4f} mmol g$^{{-1}}$\n"
-        f"Pearson $r$={pr:.4f}\n"
-        f"Spearman $\\rho$={sp:.4f}"
-    )
-    ax1.text(
-        0.03, 0.97, stats_str,
-        transform=ax1.transAxes,
-        fontsize=7.5,
-        va="top",
-        bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="#bbb", alpha=0.92),
-    )
-
-    # (b) Rolling-window density map
-    order = np.argsort(y_true)
-    t_s = y_true[order]
-    p_s = y_pred[order]
-    n_tot = len(t_s)
-
-    n_cols = max(1, int(np.ceil(n_tot / rolling_window)))
-    p_edges = np.linspace(LIMS[0], LIMS[1], n_bins + 1)
-    Z = np.zeros((n_bins, n_cols))
-    t_centres = np.zeros(n_cols)
-    t_med = np.zeros(n_cols)
-    t_q25 = np.zeros(n_cols)
-    t_q75 = np.zeros(n_cols)
-
-    for i in range(n_cols):
-        start = i * rolling_window
-        stop = min((i + 1) * rolling_window, n_tot)
-        sl_p = p_s[start:stop]
-        sl_t = t_s[start:stop]
-
-        if len(sl_t) == 0:
-            t_centres[i] = np.nan
-            t_med[i] = np.nan
-            t_q25[i] = np.nan
-            t_q75[i] = np.nan
-            continue
-
-        counts, _ = np.histogram(sl_p, bins=p_edges)
-        Z[:, i] = counts
-        t_centres[i] = float(np.mean(sl_t))
-        t_med[i] = float(np.median(sl_p))
-        t_q25[i] = float(np.percentile(sl_p, 25))
-        t_q75[i] = float(np.percentile(sl_p, 75))
-
-    valid_cols = np.isfinite(t_centres)
-    t_centres = t_centres[valid_cols]
-    t_med = t_med[valid_cols]
-    t_q25 = t_q25[valid_cols]
-    t_q75 = t_q75[valid_cols]
-    Z = Z[:, valid_cols]
-    n_cols = Z.shape[1]
-
-    if n_cols == 1:
-        width = max((LIMS[1] - LIMS[0]) * 0.05, 1e-6)
-        col_edges = np.array([t_centres[0] - width, t_centres[0] + width])
-    else:
-        col_edges = np.empty(n_cols + 1)
-        col_edges[1:-1] = 0.5 * (t_centres[:-1] + t_centres[1:])
-        first_gap = t_centres[1] - t_centres[0]
-        last_gap = t_centres[-1] - t_centres[-2]
-        col_edges[0] = t_centres[0] - first_gap / 2
-        col_edges[-1] = t_centres[-1] + last_gap / 2
-
-    Zm = np.ma.masked_where(Z == 0, Z)
-    cmap2 = plt.cm.Blues.copy()
-    cmap2.set_bad("white")
-
-    if np.max(Z) > 0:
-        im2 = ax2.pcolormesh(
-            col_edges, p_edges, Zm,
-            norm=LogNorm(vmin=1, vmax=max(int(Z.max()), 1)),
-            cmap=cmap2,
             rasterized=True,
-            shading="auto",
         )
-        cb2 = fig.colorbar(im2, ax=ax2, pad=0.02, fraction=0.046)
-        cb2.set_label("Count (log scale)", fontsize=8)
-        cb2.ax.tick_params(labelsize=7)
+        cbar = fig.colorbar(pcm, ax=ax, pad=0.02)
+        cbar.set_label("Count (log scale)", fontsize=10)
 
-    ax2.plot(LIMS, LIMS, "k--", lw=1.2, label="Identity")
-    if len(t_centres) > 0:
-        ax2.plot(t_centres, t_med, "r-", lw=1.5, label="Median")
-        ax2.fill_between(t_centres, t_q25, t_q75, color="red", alpha=0.15, label="IQR")
-    ax2.set_xlim(LIMS)
-    ax2.set_ylim(LIMS)
-    ax2.set_xlabel("Target working capacity (mmol g$^{-1}$)", fontsize=9)
-    ax2.set_ylabel("Predicted working capacity (mmol g$^{-1}$)", fontsize=9)
-    ax2.set_title(f"({title_prefix}b) Rolling density\n(sorted by target value)", fontsize=9, fontweight="bold")
-    ax2.tick_params(labelsize=8)
-    ax2.grid(True, lw=0.4, alpha=0.4)
-    ax2.legend(fontsize=7.5, loc="upper left")
+    ax.plot([lo, hi], [lo, hi], linestyle="--", linewidth=1.2, color="0.35", label="Identity line")
 
-    # (c) residual distribution
-    clip_lo = float(np.nanpercentile(res, 0.5))
-    clip_hi = float(np.nanpercentile(res, 99.5))
-    if clip_hi <= clip_lo:
-        clip_lo -= 1.0
-        clip_hi += 1.0
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+    ax.set_aspect("equal", adjustable="box")
 
-    res_clip = np.clip(res, clip_lo, clip_hi)
-    ax3.hist(
-        res_clip, bins=100, color="steelblue", alpha=0.75,
-        edgecolor="none", density=True, label="All structures"
-    )
+    ax.set_xlabel("Target CO$_2$ working capacity (mmol/g)")
+    ax.set_ylabel("Predicted CO$_2$ working capacity (mmol/g)")
+    ax.legend(loc="upper left", frameon=True)
 
-    try:
-        kde_x = np.linspace(clip_lo, clip_hi, 400)
-        kde_fn = gaussian_kde(res_clip, bw_method=0.15)
-        ax3.plot(kde_x, kde_fn(kde_x), color="navy", lw=1.8, label="KDE")
-    except Exception:
-        pass
+    ax.grid(True, alpha=0.2, linewidth=0.6)
 
-    ax3.axvline(0, color="black", lw=1.0, ls="--")
-    if np.isfinite(mae):
-        ax3.axvline(mae, color="crimson", lw=1.0, ls=":", label=f"+MAE ({mae:.3f})")
-        ax3.axvline(-mae, color="crimson", lw=1.0, ls=":")
-
-    tail_thr = 1.0
-    if clip_hi > tail_thr:
-        ax3.axvspan(tail_thr, clip_hi, alpha=0.10, color="orange", label=f"|res|>{tail_thr} mmol g$^{{-1}}$")
-    if clip_lo < -tail_thr:
-        ax3.axvspan(clip_lo, -tail_thr, alpha=0.10, color="orange")
-
-    pct_out = 100.0 * float(np.mean(np.abs(res) > tail_thr))
-    ax3.text(
-        0.97, 0.97, f"{pct_out:.1f}% with\n|res|>{tail_thr}",
-        transform=ax3.transAxes, fontsize=7.5, va="top", ha="right",
-        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#bbb", alpha=0.9),
-    )
-
-    ax3.set_xlabel("Residual: prediction $-$ target (mmol g$^{-1}$)", fontsize=9)
-    ax3.set_ylabel("Probability density", fontsize=9)
-    ax3.set_title(f"({title_prefix}c) Residual distribution", fontsize=9, fontweight="bold")
-    ax3.tick_params(labelsize=8)
-    ax3.grid(True, lw=0.4, alpha=0.4)
-    ax3.legend(fontsize=7.5)
-
-    fig.savefig(outpath, dpi=180, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-
-
-def plot_residuals_vs_target(y_true, y_pred, outpath, title="Residuals vs Target"):
-    resid = y_pred - y_true
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.scatter(y_true, resid, alpha=0.6, s=20)
-    ax.axhline(0, linestyle="--", linewidth=1)
-    ax.set_xlabel("Target")
-    ax.set_ylabel("Residual (Pred - Target)")
-    ax.set_title(title)
-    ax.grid(True, linestyle=":", linewidth=0.5)
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=200)
-    plt.close(fig)
-
-
-def plot_residual_hist_kde(y_true, y_pred, outpath, title="Residuals Distribution"):
-    resid = y_pred - y_true
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.hist(resid, bins=40, alpha=0.8, density=True)
-
-    try:
-        kde = stats.gaussian_kde(resid)
-        xs = np.linspace(np.nanpercentile(resid, 0.5), np.nanpercentile(resid, 99.5), 200)
-        ax.plot(xs, kde(xs), linewidth=1.2)
-    except Exception:
-        pass
-
-    ax.set_xlabel("Residual (Pred - Target)")
-    ax.set_ylabel("Density")
-    ax.set_title(title)
-    ax.grid(True, linestyle=":", linewidth=0.5)
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=200)
-    plt.close(fig)
-
-
-def plot_cumulative_abs_error(y_true, y_pred, outpath, title="Cumulative Absolute Error"):
-    abs_res = np.abs(y_pred - y_true)
-    sorted_abs = np.sort(abs_res)[::-1]
-    if len(sorted_abs) == 0:
-        return
-
-    cum = np.cumsum(sorted_abs)
-    frac = np.arange(1, len(sorted_abs) + 1) / len(sorted_abs)
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(frac, cum / cum[-1])
-    ax.set_xlabel("Fraction of samples (top ...)")
-    ax.set_ylabel("Cumulative fraction of total absolute error")
-    ax.set_title(title)
-    ax.grid(True, linestyle=":", linewidth=0.5)
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=200)
-    plt.close(fig)
-
-
-def plot_qq(residuals, outpath, title="QQ plot (Residuals)"):
-    fig = plt.figure(figsize=(6, 4))
-    ax = fig.add_subplot(111)
-
-    try:
-        stats.probplot(residuals, dist="norm", plot=ax)
-    except Exception:
-        res = np.sort(residuals)
-        theoretical = stats.norm.ppf(np.linspace(0.01, 0.99, len(res)))
-        ax.plot(theoretical, res, marker="o", linestyle="")
-        ax.plot(
-            [theoretical.min(), theoretical.max()],
-            [theoretical.min(), theoretical.max()],
-            linestyle="--",
-        )
-
-    ax.set_title(title)
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=200)
-    plt.close(fig)
-
-
-def plot_mae_vs_threshold(df_table, outpath):
-    if df_table is None or len(df_table) == 0:
-        return
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    labels = df_table["threshold_label"].astype(str).tolist()
-    maes = df_table["MAE"].fillna(0).tolist()
-    ns = df_table["N"].tolist()
-
-    ax.bar(range(len(maes)), maes)
-    ax.set_xticks(range(len(maes)))
-    ax.set_xticklabels([f"{lab}\nN={n}" for lab, n in zip(labels, ns)], rotation=0, ha="center")
-    ax.set_ylabel("MAE")
-    ax.set_title("MAE after removing large residuals (threshold filter)")
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=200)
-    plt.close(fig)
-
-
-def plot_bin_boxplots(df_in=None, bins=BINS, bin_labels=BIN_LABELS, outpath=None):
-    if df_in is None or len(df_in) == 0:
-        return
-
-    data = []
-    labels = []
-    for (low, high), label in zip(bins, bin_labels):
-        if np.isinf(high):
-            sub = df_in[df_in["target"] >= low].copy()
-        else:
-            sub = df_in[(df_in["target"] >= low) & (df_in["target"] < high)].copy()
-
-        if len(sub) == 0:
-            continue
-
-        data.append(sub["abs_residual"].values)
-        labels.append(f"{label}\nN={len(sub)}")
-
-    if len(data) == 0:
-        return
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.boxplot(data, labels=labels, showfliers=False)
-    ax.set_ylabel("Absolute residual")
-    ax.set_title("Absolute residuals by target bin")
-    fig.tight_layout()
-
-    if outpath is not None:
-        fig.savefig(outpath, dpi=200)
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -697,41 +432,13 @@ def analyze(df, output_dir=OUTPUT_DIR, bootstrap_iters=BOOTSTRAP_ITERS, top_k=10
         prefix = output_dir / label
         prefix.mkdir(parents=True, exist_ok=True)
 
+        # Only the parity plot is kept.
         plot_density_parity(
-            y_true, y_pred,
+            y_true,
+            y_pred,
             outpath=prefix / "pred_vs_target_density.png",
             title_prefix=f"{label} — ",
         )
-
-        plot_residuals_vs_target(
-            y_true, y_pred,
-            prefix / "residuals_vs_target.png",
-            title=f"Residuals vs Target ({label})",
-        )
-        plot_residual_hist_kde(
-            y_true, y_pred,
-            prefix / "residuals_hist_kde.png",
-            title=f"Residuals Distribution ({label})",
-        )
-        plot_cumulative_abs_error(
-            y_true, y_pred,
-            prefix / "cumulative_abs_error.png",
-            title=f"Cumulative Absolute Error ({label})",
-        )
-        plot_qq(
-            y_pred - y_true,
-            prefix / "residuals_qq.png",
-            title=f"QQ plot resid ({label})",
-        )
-
-        subdf = subdf.assign(
-            residual=(subdf["prediction"] - subdf["target"]).abs(),
-            signed_residual=(subdf["prediction"] - subdf["target"]),
-        )
-        worst = subdf.sort_values("residual", ascending=False).head(top_k)
-        worst_file = prefix / f"top_{top_k}_worst.csv"
-        worst.to_csv(worst_file, index=False)
-        metrics["top_k_worst_csv"] = str(worst_file)
 
     with open(output_dir / "metrics_summary.json", "w") as fh:
         json.dump(results, fh, indent=2)
@@ -755,11 +462,6 @@ def analyze(df, output_dir=OUTPUT_DIR, bootstrap_iters=BOOTSTRAP_ITERS, top_k=10
         fh.write("# Thresholds summary\n\n")
         fh.write(thr_table_md)
 
-    try:
-        plot_mae_vs_threshold(thr_table, output_dir / "mae_vs_threshold.png")
-    except Exception:
-        warnings.warn("failed to create mae_vs_threshold plot")
-
     df_bins, df_tests_global, df_pairwise = build_bin_stats_and_tests(
         df_full,
         bins=BINS,
@@ -769,11 +471,6 @@ def analyze(df, output_dir=OUTPUT_DIR, bootstrap_iters=BOOTSTRAP_ITERS, top_k=10
     df_bins.to_csv(output_dir / "bin_stats.csv", index=False)
     df_tests_global.to_csv(output_dir / "bin_tests_global.csv", index=False)
     df_pairwise.to_csv(output_dir / "bin_pairwise_tests.csv", index=False)
-
-    try:
-        plot_bin_boxplots(df=df_full, outpath=output_dir / "bins_abs_residual_boxplot.png")
-    except Exception:
-        warnings.warn("failed to create bin boxplot")
 
     print("\n=== Summary metrics (saved to metrics_summary.json) ===")
     for k, v in results.items():
@@ -788,7 +485,7 @@ def analyze(df, output_dir=OUTPUT_DIR, bootstrap_iters=BOOTSTRAP_ITERS, top_k=10
     print(f"Bin stats saved to: {(output_dir / 'bin_stats.csv').resolve()}")
     print(f"Pairwise bin tests saved to: {(output_dir / 'bin_pairwise_tests.csv').resolve()}")
     print(f"Plots and CSV outputs saved to: {output_dir.resolve()}")
-    print(f"\nDensity parity figures saved to: <output_dir>/<subset>/pred_vs_target_density.png")
+    print(f"\nParity figures saved to: <output_dir>/<subset>/pred_vs_target_density.png")
 
     return results, thr_table, df_bins, df_tests_global, df_pairwise
 

@@ -14,8 +14,7 @@
     "NormalizedMAE": 0.2159955941821123,
     "MAE_bootstrap_mean": 0.18156528431466892,
     "MAE_CI_2.5%": 0.17662596968594274,
-    "MAE_CI_97.5%": 0.18649971412621263,
-    "top_k_worst_csv": "stat_analysis_output/all/top_10_worst.csv"
+    "MAE_CI_97.5%": 0.18649971412621263
   },
   "valid": {
     "MAE": 0.18148506196496794,
@@ -32,7 +31,6 @@
     "NormalizedMAE": 0.2159955941821123,
     "MAE_bootstrap_mean": 0.18156528431466892,
     "MAE_CI_2.5%": 0.17662596968594274,
-    "MAE_CI_97.5%": 0.18649971412621263,
-    "top_k_worst_csv": "stat_analysis_output/valid/top_10_worst.csv"
+    "MAE_CI_97.5%": 0.18649971412621263
   }
 }
