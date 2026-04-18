@@ -18,16 +18,22 @@ This repository is organized into three main functional components: voxelization
 ├── attribution
 │   └── attribute_analysis.py # Post-hoc feature attribution for model explainability
 ├── graph_benchmarking
-│   └── calc.py            # Comparative benchmarks with graph architectures
+│   └── exp1/              # GNN benchmarking results and checkpoints
 ├── pretraining_contri
-│   └── line_plots.py      # Pre-training vs. fine-tuning ablation studies
+│   ├── cgcnn/             # CGCNN ablation experiments (01-20%)
+│   ├── cnn/               # 3D CNN baseline experiments
+│   ├── mae/               # MAE pre-training experiments
+│   └── mae_ft_only/       # Supervised MAE baseline (no pre-training)
 ├── voxel_ablation
-│   └── line_plots.py      # Grid resolution impact analysis (32, 64, 96)
+│   ├── 32/                # 32³ resolution model results
+│   ├── 64/                # 64³ resolution model results
+│   ├── 96/                # 96³ resolution model results
+│   └── an2.py             # Resolution fidelity and signal analysis script
 ├── voxelization
 │   └── voxel.py           # CIF → multi-channel 3D voxelization pipeline
 ├── training
 │   └── train.py           # Training and fine-tuning entry point (MAE + regression)
-├── splits                 # Experimental data splits (1%, 3%, 5%, 10%, 20%)
+├── splits                 # Experimental data splits (01pct, 05pct, 10pct, 20pct)
 ├── mae_best.pt            # Pre-trained / fine-tuned model checkpoint
 └── README.md
 ```
@@ -232,19 +238,19 @@ Interpretability and evaluation toolkit:
 
 ### `graph_benchmarking/`
 
-* **Benchmarks:** Scripts for comparing the 3D Voxel MAE performance against state-of-the-art graph-based models like CGCNN and GCNN.
+* **Benchmarks:** Directory containing experimental results (`exp1`) for comparing the 3D Voxel MAE performance against state-of-the-art graph-based models.
 
 ### `pretraining_contri/`
 
-* **Ablation Studies:** Analysis of how self-supervised pre-training impacts downstream regression performance compared to training from scratch or fine-tuning only.
+* **Ablation Studies:** Multi-model assessment (MAE, CNN, CGCNN) across different data regimes to quantify the impact of self-supervised pre-training on downstream regression performance.
 
 ### `voxel_ablation/`
 
-* **Resolution Study:** Systematic evaluation of model performance across different voxel grid sizes (e.g., 32³, 64³, 96³) to determine optimal discretization parameters.
+* **Resolution Study:** Systematic evaluation of model performance and signal fidelity across different voxel grid sizes (32³, 64³, 96³) using the `an2.py` analysis script.
 
 ### `splits/`
 
-* **Low-Data Regime:** Standardized directory for 1%, 3%, 5%, 10%, and 20% training data splits, used to evaluate model robustness and learning efficiency in data-scarce scenarios.
+* **Low-Data Regime:** Standardized training data splits (01pct, 05pct, 10pct, and 20pct) used to evaluate model robustness and learning efficiency in data-scarce scenarios.
 
 ---
 
