@@ -1,7 +1,3 @@
-"""
-CNN baseline for voxel regression.
-"""
-
 import os
 import math
 import argparse
@@ -21,10 +17,6 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 
-# ─────────────────────────────────────────────
-# Hardware setup
-# ─────────────────────────────────────────────
-
 def configure_gpu():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -32,10 +24,6 @@ def configure_gpu():
     torch.backends.cudnn.deterministic = False
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-
-# ─────────────────────────────────────────────
-# Reproducibility
-# ─────────────────────────────────────────────
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -45,10 +33,6 @@ def set_seed(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
-# ─────────────────────────────────────────────
-# Filename helpers
-# ─────────────────────────────────────────────
 
 def ensure_cif_ext(name: str) -> str:
     if not isinstance(name, str):
@@ -64,10 +48,6 @@ def voxel_path_to_cif_name(p: Path) -> str:
             return ensure_cif_ext(name[: len(name) - len(s)])
     return ensure_cif_ext(p.stem)
 
-
-# ─────────────────────────────────────────────
-# CSV helpers
-# ─────────────────────────────────────────────
 
 def load_targets_csv(csv_path: str, filename_col: str, target_col: str) -> dict:
     df = pd.read_csv(csv_path, low_memory=False)
@@ -98,12 +78,7 @@ def load_name_set(csv_path: str, filename_col: str) -> set:
     return names
 
 
-# ─────────────────────────────────────────────
-# Checkpoint helpers
-# ─────────────────────────────────────────────
-
 def unwrap_model(m):
-    """Return the base model, removing DDP and compile wrappers if present."""
     if hasattr(m, "module"):
         m = m.module
     if hasattr(m, "_orig_mod"):
@@ -112,25 +87,15 @@ def unwrap_model(m):
 
 
 def clean_state_dict(state_dict):
-    """
-    Remove common wrapper prefixes so checkpoints can be loaded across:
-    - plain models
-    - DDP-wrapped models
-    - torch.compile() wrapped models
-    """
     cleaned = {}
     for k, v in state_dict.items():
         if k.startswith("_orig_mod."):
-            k = k[len("_orig_mod.") :]
+            k = k[len("_orig_mod."):]
         if k.startswith("module."):
-            k = k[len("module.") :]
+            k = k[len("module."):]
         cleaned[k] = v
     return cleaned
 
-
-# ─────────────────────────────────────────────
-# Dataset
-# ─────────────────────────────────────────────
 
 class VoxelDataset(Dataset):
     def __init__(self, files, targets=None):
@@ -174,10 +139,6 @@ class VoxelDataset(Dataset):
         return torch.from_numpy(vox), torch.tensor(target, dtype=torch.float32), f.name
 
 
-# ─────────────────────────────────────────────
-# GPU Prefetcher
-# ─────────────────────────────────────────────
-
 class CUDAPrefetcher:
     def __init__(self, loader, device: torch.device):
         self.loader = loader
@@ -218,10 +179,6 @@ class CUDAPrefetcher:
         return batch
 
 
-# ─────────────────────────────────────────────
-# Model
-# ─────────────────────────────────────────────
-
 class SimpleVoxelCNN(nn.Module):
     def __init__(self, in_channels: int = 1):
         super().__init__()
@@ -258,10 +215,6 @@ class SimpleVoxelCNN(nn.Module):
         return self.head(self.gap(self.net(x)).flatten(1)).view(-1)
 
 
-# ─────────────────────────────────────────────
-# Distributed helpers
-# ─────────────────────────────────────────────
-
 def _safe_barrier(distributed, device):
     if not distributed:
         return
@@ -281,10 +234,6 @@ def _gather_objects(local_obj, distributed):
     return gathered
 
 
-# ─────────────────────────────────────────────
-# Atomic checkpoint save / prune
-# ─────────────────────────────────────────────
-
 def _atomic_save(obj: dict, dst: Path):
     tmp = dst.with_suffix(".tmp")
     torch.save(obj, str(tmp))
@@ -303,13 +252,7 @@ def _prune_epoch_checkpoints(out_dir: Path, current_epoch: int, keep_last_n: int
             pass
 
 
-# ─────────────────────────────────────────────
-# Sync BN running stats across ranks manually
-# (replaces DDP broadcast_buffers which we disabled)
-# ─────────────────────────────────────────────
-
 def _sync_bn_buffers(model, distributed):
-    """All-reduce BatchNorm running_mean / running_var across ranks."""
     if not distributed:
         return
     world_size = dist.get_world_size()
@@ -330,15 +273,10 @@ def _sync_bn_buffers(model, distributed):
         offset += n
 
 
-# ─────────────────────────────────────────────
-# Evaluation
-# ─────────────────────────────────────────────
-
 def evaluate(model, loader, device, args, distributed=False, output_csv=None):
     model_eval = model.module if (distributed and hasattr(model, "module")) else model
     model_eval.eval()
 
-    # Sync BN stats before eval so all ranks see the same running stats
     _sync_bn_buffers(model_eval, distributed)
 
     loss_fn = nn.L1Loss(reduction="mean") if args.reg_loss == "l1" else nn.MSELoss(reduction="mean")
@@ -393,7 +331,6 @@ def evaluate(model, loader, device, args, distributed=False, output_csv=None):
                         }
                     )
 
-    # All ranks must participate in this all_reduce
     if distributed:
         dist.barrier()
         t = torch.tensor([local_weighted_loss, local_count], device=device, dtype=torch.float64)
@@ -415,14 +352,9 @@ def evaluate(model, loader, device, args, distributed=False, output_csv=None):
     return eval_loss
 
 
-# ─────────────────────────────────────────────
-# Training
-# ─────────────────────────────────────────────
-
 def train(args):
     configure_gpu()
 
-    # ── DDP setup ─────────────────────────────
     distributed = False
     local_rank = 0
     is_main = True
@@ -445,12 +377,10 @@ def train(args):
 
     set_seed(args.seed)
 
-    # ── Targets ───────────────────────────────
     targets = None
     if args.targets_csv:
         targets = load_targets_csv(args.targets_csv, args.filename_col, args.target_col)
 
-    # ── Build split from CSV files ─────────────
     split_dir = Path(args.split_dir)
     train_csv_path = split_dir / "train.csv"
     val_csv_path = split_dir / "val.csv"
@@ -467,7 +397,6 @@ def train(args):
     if is_main:
         print(f"[Split] CSV names — train={len(train_names)}  val={len(val_names)}  test={len(test_names)}")
 
-    # ── Discover voxel files ───────────────────
     vox_dir = Path(args.vox_dir)
     if not vox_dir.exists():
         raise RuntimeError(f"--vox-dir {vox_dir} does not exist")
@@ -510,7 +439,6 @@ def train(args):
     val_ds = VoxelDataset(val_files, targets=targets) if val_files else None
     test_ds = VoxelDataset(test_files, targets=targets) if test_files else None
 
-    # ── DataLoaders ────────────────────────────
     num_workers = args.num_workers
     dl_common = dict(
         pin_memory=(device.type == "cuda"),
@@ -542,7 +470,6 @@ def train(args):
         else None
     )
 
-    # ── Model ──────────────────────────────────
     sample_vox, _, _ = train_ds[0]
     in_channels = sample_vox.shape[0]
 
@@ -552,9 +479,6 @@ def train(args):
     if is_main:
         n_params = sum(p.numel() for p in model.parameters()) / 1e6
         print(f"[Model] SimpleVoxelCNN | params: {n_params:.2f} M")
-
-    # NOTE: torch.compile intentionally removed — causes asymmetric NCCL
-    # collectives with DDP + channels_last_3d (see cudagraph warnings in logs)
 
     if distributed:
         model = DDP(
@@ -567,7 +491,6 @@ def train(args):
             static_graph=False,
         )
 
-    # ── Target normalisation (train split only) ─
     if args.normalize_target and targets is not None:
         train_vals = [
             targets[voxel_path_to_cif_name(f)]
@@ -582,7 +505,6 @@ def train(args):
         if is_main:
             print(f"[Targets] train mean={args._target_mean:.6g}  std={args._target_std:.6g}")
 
-    # ── Optimizer: fused AdamW ─────────────────
     try:
         opt = torch.optim.AdamW(
             model.parameters(),
@@ -597,16 +519,13 @@ def train(args):
         if is_main:
             print("[Optimizer] AdamW (fused unavailable)")
 
-    # ── Scheduler ─────────────────────────────
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
 
-    # ── AMP ───────────────────────────────────
     amp_enabled = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda" if amp_enabled else "cpu", enabled=amp_enabled)
 
     loss_fn = nn.L1Loss() if args.reg_loss == "l1" else nn.MSELoss()
 
-    # ── Resume ─────────────────────────────────
     start_epoch = 1
     best_loss = float("inf")
     patience_cnt = 0
@@ -661,7 +580,6 @@ def train(args):
     if is_main:
         print(f"[Training] epochs {start_epoch} → {end_epoch}")
 
-    # ── Helper: build checkpoint dict ─────────
     def _make_checkpoint(epoch: int) -> dict:
         m_state = clean_state_dict(unwrap_model(model).state_dict())
         ck = {
@@ -677,7 +595,6 @@ def train(args):
         }
         return ck
 
-    # ── Training loop ─────────────────────────
     try:
         for epoch in range(start_epoch, end_epoch + 1):
             model.train()
@@ -730,7 +647,6 @@ def train(args):
             if is_main:
                 print(f"Epoch {epoch} train loss: {epoch_loss:.6f}")
 
-            # ── Validation ────────────────────
             val_loss = float("nan")
             if val_loader is not None:
                 _safe_barrier(distributed, device)
@@ -754,7 +670,6 @@ def train(args):
                 patience_cnt += 1
                 improved = False
 
-            # ── Save checkpoints (main rank only) ─
             if is_main:
                 ck = _make_checkpoint(epoch)
 
@@ -773,7 +688,6 @@ def train(args):
                     print(f"Early stopping at epoch {epoch}  (patience={args.patience}).")
                 break
 
-        # ── Test ───────────────────────────────
         if test_loader is not None:
             _safe_barrier(distributed, device)
 
@@ -837,14 +751,9 @@ def train(args):
         print(f"[Done] Best loss: {best_loss:.6f}")
 
 
-# ─────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────
-
 if __name__ == "__main__":
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    # Paths
     p.add_argument("--vox-dir", required=True)
     p.add_argument("--out-dir", default="cnn_runs")
     p.add_argument("--split-dir", required=True)
@@ -852,7 +761,6 @@ if __name__ == "__main__":
     p.add_argument("--filename-col", default="filename")
     p.add_argument("--target-col", default="wc_mmolg")
 
-    # Training
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--epochs-per-run", type=int, default=0)
     p.add_argument("--batch", dest="batch_size", type=int, default=16)
@@ -865,16 +773,13 @@ if __name__ == "__main__":
     p.add_argument("--patience", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
 
-    # Checkpointing
     p.add_argument("--resume", default=None)
     p.add_argument("--auto-resume", action="store_true")
     p.add_argument("--keep-last-n", type=int, default=3)
 
-    # DDP
     p.add_argument("--distributed", action="store_true")
-    p.add_argument("--dist-timeout-seconds", type=int, default=14400)  # 4 hours
+    p.add_argument("--dist-timeout-seconds", type=int, default=14400)
 
     args = p.parse_args()
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
-    train(args) 
-
+    train(args)

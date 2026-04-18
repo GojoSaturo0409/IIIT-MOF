@@ -1,31 +1,3 @@
-"""
-attribution_analysis_v2.py
-
-Enhanced gradient-based saliency and attention rollout for the MAE3D model.
-Addresses reviewer comment: "attribution methods could reveal where in the
-structure the model attends for CO2 uptake predictions, potentially uncovering
-physically meaningful adsorption motifs."
-
-Key additions over v1:
-  - Per-channel saliency decomposition (metal / organic / C / O / N / H / charge)
-  - Pore-vs-atom analysis: does the model attend to empty space or atomic density?
-  - Saliency-occupancy correlation per structure
-  - Rollout max/mean ratio (discriminative signal, not broken mean)
-  - DB-source-aware group analysis
-  - Systematic prediction bias diagnosis
-  - Fixed linear probing (robust scaler, leave-one-out for small N)
-  - Summary figures formatted for paper inclusion
-
-Usage:
-  python attribution_analysis_v2.py \
-      --checkpoint mae_best.pt \
-      --vox-dir voxels_64 \
-      --predictions-csv transfer/test_predictions.csv \
-      --out-dir attribution_output_v2 \
-      --patch 8 \
-      --n-best 20 --n-worst 20
-"""
-
 import argparse
 import math
 from pathlib import Path
@@ -43,10 +15,6 @@ import pandas as pd
 from scipy import stats
 from tqdm import tqdm
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Voxel channel definitions (must match voxelizer defaults)
-# channels = ['total', 'metal', 'organic', 'C', 'O', 'N', 'H', 'charge']
-# ─────────────────────────────────────────────────────────────────────────────
 VOX_CHANNELS = ["total", "metal", "organic", "C", "O", "N", "H", "charge"]
 CH_TOTAL   = 0
 CH_METAL   = 1
@@ -57,9 +25,6 @@ CH_N       = 5
 CH_H       = 6
 CH_CHARGE  = 7
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Model (identical to v1)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def patchify_batch(x, patch):
     B, C, G, _, _ = x.shape
@@ -129,52 +94,31 @@ class MAE3DWithAttn(nn.Module):
         return pooled, self.encoder._attn_weights
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Attribution methods
-# ─────────────────────────────────────────────────────────────────────────────
-
 def gradient_saliency(model, reg_head, patches, device):
-    """
-    |∂prediction/∂patches| averaged over patch-feature dim → (B, N).
-    Also returns per-channel saliency: (B, N, C_vox) where each element is
-    the mean gradient magnitude for that voxel channel within the patch.
-    """
     B, N, D = patches.shape
-    patch_dim = D  # C_vox * patch^3
+    patch_dim = D
 
     patches_in = patches.clone().detach().to(device).requires_grad_(True)
     feats, _ = model.encode(patches_in)
     pred = reg_head(feats).squeeze(-1)
     pred.sum().backward()
 
-    grad = patches_in.grad  # (B, N, D)
-    grad_mag = grad.abs()   # (B, N, D)
+    grad = patches_in.grad
+    grad_mag = grad.abs()
 
-    # Overall saliency: mean over all patch features
-    sal_overall = grad_mag.mean(dim=-1).detach().cpu()   # (B, N)
+    sal_overall = grad_mag.mean(dim=-1).detach().cpu()
 
     return sal_overall, grad.detach().cpu(), grad_mag.detach().cpu()
 
 
 def per_channel_saliency(grad_mag, patch, n_vox_channels):
-    """
-    Given gradient magnitude (B, N, D) where D = C * patch^3,
-    return per-channel saliency (B, N, C) by averaging over spatial
-    locations within each channel's contribution to the patch vector.
-    """
     B, N, D = grad_mag.shape
     p3 = patch ** 3
-    # D = n_vox_channels * p3
-    # Reshape: (B, N, C, p^3) then mean over p^3
-    sal_ch = grad_mag.view(B, N, n_vox_channels, p3).mean(dim=-1)  # (B, N, C)
+    sal_ch = grad_mag.view(B, N, n_vox_channels, p3).mean(dim=-1)
     return sal_ch.cpu()
 
 
 def attention_rollout(attn_weights_list, discard_ratio=0.9):
-    """
-    Chefer (2021) rollout. Returns (B, N) relevance per patch.
-    Use max/mean ratio as discriminative signal, not raw mean.
-    """
     B, H, N, _ = attn_weights_list[0].shape
     rollout = torch.eye(N).unsqueeze(0).expand(B, -1, -1).clone()
 
@@ -187,17 +131,15 @@ def attention_rollout(attn_weights_list, discard_ratio=0.9):
         a = a / (a.sum(dim=-1, keepdim=True) + 1e-8)
         rollout = torch.bmm(a, rollout)
 
-    relevance = rollout.mean(dim=1)   # (B, N)
+    relevance = rollout.mean(dim=1)
     return relevance
 
 
 def rollout_concentration(rollout_n):
-    """Max/mean ratio — how much more does the top patch get vs average?"""
     return float(rollout_n.max()) / (float(rollout_n.mean()) + 1e-10)
 
 
 def saliency_concentration_gini(sal_n):
-    """Gini coefficient of saliency distribution (0=uniform, 1=single patch)."""
     sv = np.sort(sal_n.flatten())
     n = len(sv)
     return float((2 * np.sum(np.arange(1, n+1) * sv) - (n+1) * sv.sum())
@@ -208,38 +150,22 @@ def patches_to_3d(scores_n, n_side):
     return scores_n.reshape(n_side, n_side, n_side)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Physical interpretation helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
 def compute_patch_occupancy(vox, patch, n_side):
-    """
-    For a voxel (C, G, G, G), return per-patch mean of each channel.
-    Returns occupancy (N, C) and pore fraction (N,) = fraction of total
-    channel that is zero (empty space).
-    """
     B = 1
     C = vox.shape[0]
-    vox_t = torch.from_numpy(vox).unsqueeze(0)  # (1, C, G, G, G)
-    patches = patchify_batch(vox_t, patch)       # (1, N, C*patch^3)
+    vox_t = torch.from_numpy(vox).unsqueeze(0)
+    patches = patchify_batch(vox_t, patch)
     N, D = patches.shape[1], patches.shape[2]
     p3 = patch ** 3
 
-    # Reshape to (N, C, p^3)
-    patches_np = patches.squeeze(0).numpy()  # (N, D)
-    occ = patches_np.reshape(N, C, p3).mean(axis=-1)   # (N, C) mean per channel per patch
-    pore_frac = (patches_np == 0).mean(axis=-1)         # (N,) fraction of zeros per patch
+    patches_np = patches.squeeze(0).numpy()
+    occ = patches_np.reshape(N, C, p3).mean(axis=-1)
+    pore_frac = (patches_np == 0).mean(axis=-1)
 
     return occ, pore_frac
 
 
 def saliency_occupancy_correlation(sal_n, patch_occ, pore_frac):
-    """
-    Correlate saliency with:
-    - patch_occ (N, C): per-channel atomic density
-    - pore_frac (N,): fraction of empty voxels (pore space proxy)
-    Returns dict of Pearson r and p-value for each channel + pore.
-    """
     results = {}
     for ci, chname in enumerate(VOX_CHANNELS):
         r, p = stats.pearsonr(sal_n, patch_occ[:, ci] + 1e-10)
@@ -250,11 +176,6 @@ def saliency_occupancy_correlation(sal_n, patch_occ, pore_frac):
 
 
 def spatial_analysis(sal_3d):
-    """
-    Returns:
-      - weighted_dist_from_center: does saliency cluster at edges or interior?
-      - surface_vs_interior: ratio of mean saliency on outer shell vs inner core
-    """
     G = sal_3d.shape[0]
     cx = cy = cz = (G - 1) / 2.0
     dist = np.zeros((G, G, G))
@@ -266,7 +187,6 @@ def spatial_analysis(sal_3d):
     s_norm = sal_3d / (sal_3d.sum() + 1e-10)
     weighted_dist = float(np.sum(s_norm * dist))
 
-    # Outer shell = patches where any index is 0 or G-1
     shell_mask = np.zeros((G, G, G), dtype=bool)
     shell_mask[0, :, :] = shell_mask[-1, :, :] = True
     shell_mask[:, 0, :] = shell_mask[:, -1, :] = True
@@ -278,10 +198,6 @@ def spatial_analysis(sal_3d):
 
     return weighted_dist, surface_ratio
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Visualisation
-# ─────────────────────────────────────────────────────────────────────────────
 
 def plot_saliency_projections(saliency_3d, title, outpath, cmap="hot"):
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
@@ -302,10 +218,6 @@ def plot_saliency_projections(saliency_3d, title, outpath, cmap="hot"):
 
 
 def plot_channel_saliency_bars(channel_sal_best, channel_sal_worst, outpath):
-    """
-    Bar chart: mean per-channel saliency for best vs worst group.
-    Directly answers: which voxel channels drive predictions?
-    """
     channels = VOX_CHANNELS
     x = np.arange(len(channels))
     width = 0.35
@@ -315,7 +227,6 @@ def plot_channel_saliency_bars(channel_sal_best, channel_sal_worst, outpath):
     best_sems   = np.array([channel_sal_best[c]["sem"]   for c in channels])
     worst_sems  = np.array([channel_sal_worst[c]["sem"]  for c in channels])
 
-    # Normalise so bars sum to 1 (relative importance)
     best_means_norm  = best_means  / (best_means.sum()  + 1e-10)
     worst_means_norm = worst_means / (worst_means.sum() + 1e-10)
 
@@ -339,22 +250,17 @@ def plot_channel_saliency_bars(channel_sal_best, channel_sal_worst, outpath):
 
 
 def plot_saliency_occupancy_heatmap(corr_data_best, corr_data_worst, outpath):
-    """
-    Heatmap of saliency–occupancy Pearson r for each channel × group.
-    Shows whether model attends to metal nodes, pore space, linkers etc.
-    """
     channels = VOX_CHANNELS + ["pore_fraction"]
     r_best  = [corr_data_best[c]["r"]  for c in channels]
     r_worst = [corr_data_worst[c]["r"] for c in channels]
     p_best  = [corr_data_best[c]["p"]  for c in channels]
     p_worst = [corr_data_worst[c]["p"] for c in channels]
 
-    data = np.array([r_best, r_worst])   # (2, n_channels)
+    data = np.array([r_best, r_worst])
 
     fig, ax = plt.subplots(figsize=(10, 3))
     im = ax.imshow(data, cmap="RdBu_r", vmin=-0.6, vmax=0.6, aspect="auto")
 
-    # Significance stars
     for row, pvals in enumerate([p_best, p_worst]):
         for col, p in enumerate(pvals):
             star = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ""))
@@ -374,10 +280,6 @@ def plot_saliency_occupancy_heatmap(corr_data_best, corr_data_worst, outpath):
 
 
 def plot_prediction_bias(df, outpath):
-    """
-    Scatter of prediction vs target coloured by DB source.
-    Reveals systematic underprediction for high-uptake structures.
-    """
     db_colors = {
         "DB0": "#4C72B0", "DB1": "#DD8452", "DB5": "#55A868",
         "DB12": "#C44E52", "DB15": "#8172B2", "other": "#999999"
@@ -402,7 +304,6 @@ def plot_prediction_bias(df, outpath):
     ax.legend(fontsize=9, framealpha=0.8)
     ax.grid(True, linestyle=":", linewidth=0.5)
 
-    # Annotate bias
     worst = df[df["group"] == "worst"]
     bias = (worst["prediction"] - worst["target"]).mean()
     ax.annotate(f"Worst-group bias = {bias:.2f} mmol/g\n(systematic underprediction)",
@@ -423,7 +324,6 @@ def plot_group_comparison(best_scores, worst_scores, metric_name, outpath,
         pc.set_facecolor(col)
         pc.set_alpha(0.7)
 
-    # Mann-Whitney U test
     stat, pval = stats.mannwhitneyu(best_scores, worst_scores, alternative="two-sided")
     sig = "***" if pval < 0.001 else ("**" if pval < 0.01 else ("*" if pval < 0.05 else "n.s."))
 
@@ -461,7 +361,6 @@ def plot_saliency_sparsity_scatter(sparsity_vals, saliency_entropy, errors, outp
 
 
 def plot_rollout_comparison(best_vals, worst_vals, outpath):
-    """Rollout max/mean ratio — how focused is the attention?"""
     plot_group_comparison(
         best_vals, worst_vals,
         metric_name="Rollout max/mean ratio",
@@ -473,13 +372,9 @@ def plot_rollout_comparison(best_vals, worst_vals, outpath):
 
 def plot_summary_panel(df, channel_best, channel_worst, corr_best, corr_worst,
                        out_dir):
-    """
-    Single composite figure for paper: 4-panel summary.
-    """
     fig = plt.figure(figsize=(14, 10))
     gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.35)
 
-    # Panel A: prediction bias
     ax_a = fig.add_subplot(gs[0, 0])
     df2 = df.copy()
     df2["db"] = df2["filename"].str.extract(r"^(DB\d+)")
@@ -497,7 +392,6 @@ def plot_summary_panel(df, channel_best, channel_worst, corr_best, corr_worst,
     ax_a.legend(fontsize=7, framealpha=0.8)
     ax_a.grid(True, linestyle=":", linewidth=0.5)
 
-    # Panel B: per-channel saliency
     ax_b = fig.add_subplot(gs[0, 1])
     channels = VOX_CHANNELS
     x = np.arange(len(channels))
@@ -513,7 +407,6 @@ def plot_summary_panel(df, channel_best, channel_worst, corr_best, corr_worst,
     ax_b.set_title("B) Per-channel saliency")
     ax_b.legend(fontsize=8); ax_b.grid(True, linestyle=":", axis="y", linewidth=0.5)
 
-    # Panel C: saliency-occupancy correlation heatmap
     ax_c = fig.add_subplot(gs[1, 0])
     all_ch = VOX_CHANNELS + ["pore_fraction"]
     r_best  = [corr_best.get(c, {}).get("r", 0)  for c in all_ch]
@@ -531,7 +424,6 @@ def plot_summary_panel(df, channel_best, channel_worst, corr_best, corr_worst,
             ax_c.text(col, row, f"{r:.2f}", ha="center", va="center",
                       fontsize=7, color="white" if abs(r) > 0.35 else "black")
 
-    # Panel D: saliency entropy vs sparsity
     ax_d = fig.add_subplot(gs[1, 1])
     sc = ax_d.scatter(df2["voxel_sparsity"], df2["saliency_entropy"],
                       c=df2["abs_residual"], cmap="RdYlGn_r", alpha=0.75, s=30,
@@ -547,16 +439,7 @@ def plot_summary_panel(df, channel_best, channel_worst, corr_best, corr_worst,
     print(f"[Saved] {out_dir / 'summary_panel.png'}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Linear probing (fixed)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def linear_probe(embeddings, targets, feature_name="feature"):
-    """
-    Ridge regression with robust scaler and 5-fold CV.
-    Each fold has N/5 test samples so R² is always well-defined.
-    R² > 0.1 = model encodes the feature; R² > 0.5 = strong encoding.
-    """
     from sklearn.linear_model import Ridge
     from sklearn.model_selection import KFold, cross_val_score
     from sklearn.preprocessing import RobustScaler
@@ -575,10 +458,6 @@ def linear_probe(embeddings, targets, feature_name="feature"):
     scores = np.clip(scores, -1, 1)
     return float(scores.mean()), float(scores.std())
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# I/O helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def load_model_and_head(ckpt_path, patch_dim, args, device):
     model = MAE3DWithAttn(
@@ -642,7 +521,6 @@ def load_vox(fname, vox_index):
     if p.suffix == ".npz":
         d = np.load(p, allow_pickle=True)
         v = d["vox"] if "vox" in d else d[d.files[0]]
-        # Read stored channel names if available
         ch = list(d["channels"]) if "channels" in d else VOX_CHANNELS
     elif p.suffix == ".npy":
         v = np.load(p)
@@ -654,23 +532,17 @@ def load_vox(fname, vox_index):
 
     v = np.array(v, dtype=np.float32)
     if v.ndim == 3:
-        v = v[np.newaxis]      # (1,G,G,G) → (1,1,G,G,G) won't happen; this adds C dim if missing
-    # Ensure shape is (C, G, G, G) — never (1, C, G, G, G)
+        v = v[np.newaxis]
     if v.ndim == 5:
         v = v[0]
     return v, ch
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main pipeline
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Load predictions ──────────────────────────────────────────────────────
     pred_df = pd.read_csv(args.predictions_csv)
     pred_df["abs_residual"] = (pred_df["prediction"] - pred_df["target"]).abs()
     pred_df = pred_df.dropna(subset=["abs_residual"])
@@ -681,7 +553,6 @@ def run(args):
     worst_df.to_csv(out_dir / "worst_group.csv", index=False)
     print(f"[Groups] Best N={len(best_df)}, Worst N={len(worst_df)}")
 
-    # Prediction bias figure (no model needed)
     all_df = pd.concat([
         best_df.assign(group="best"),
         worst_df.assign(group="worst")
@@ -691,7 +562,6 @@ def run(args):
     worst_bias = (worst_df["prediction"] - worst_df["target"]).mean()
     print(f"[Bias] Worst-group mean bias = {worst_bias:.3f} mmol/g")
 
-    # ── Discover voxel files ──────────────────────────────────────────────────
     vox_dir = Path(args.vox_dir)
     sample_files = (list(vox_dir.glob("*_vox.npz")) +
                     list(vox_dir.glob("*.npy")) +
@@ -717,17 +587,13 @@ def run(args):
 
     print(f"[Voxels] G={G}, C={C}, channels={vox_channels}, patch={patch}, N={N}")
 
-    # ── Load model ────────────────────────────────────────────────────────────
     model, reg_head = load_model_and_head(
         Path(args.checkpoint), patch_dim, args, device)
     model.init_pos_embeds(N, device)
 
-    # ── Per-structure attribution ─────────────────────────────────────────────
     results = []
-    # Accumulators for per-channel saliency stats
     ch_sal_store = {"best": {c: [] for c in vox_channels},
                     "worst": {c: [] for c in vox_channels}}
-    # Accumulators for saliency-occupancy correlations
     corr_store = {"best": {c: [] for c in vox_channels + ["pore_fraction"]},
                   "worst": {c: [] for c in vox_channels + ["pore_fraction"]}}
 
@@ -746,47 +612,38 @@ def run(args):
             vox_t   = torch.from_numpy(vox).unsqueeze(0).to(device)
             patches = patchify_batch(vox_t, patch)
 
-            # ── gradient saliency + per-channel breakdown ──────────────────
             sal_overall, grad, grad_mag = gradient_saliency(
                 model, reg_head, patches, device)
-            sal_n = sal_overall[0].numpy()   # (N,)
+            sal_n = sal_overall[0].numpy()
 
-            # Per-channel saliency (N, C)
-            sal_ch = per_channel_saliency(grad_mag, patch, n_vox_channels)[0]  # (N, C)
+            sal_ch = per_channel_saliency(grad_mag, patch, n_vox_channels)[0]
 
-            # ── attention rollout ──────────────────────────────────────────
             with torch.no_grad():
                 _, attn_list = model.encode(patches)
-            rollout_n = attention_rollout(attn_list)[0].numpy()  # (N,)
+            rollout_n = attention_rollout(attn_list)[0].numpy()
             roll_conc  = rollout_concentration(rollout_n)
 
-            # ── 3-D reshape ────────────────────────────────────────────────
             sal_3d     = patches_to_3d(sal_n,     n_side)
             rollout_3d = patches_to_3d(rollout_n, n_side)
 
-            # ── spatial analysis ───────────────────────────────────────────
             weighted_dist, surface_ratio = spatial_analysis(sal_3d)
 
-            # ── patch occupancy + saliency-occupancy correlation ──────────
-            # vox is (C, G, G, G); unsqueeze to (1, C, G, G, G) for patchify
             vox_t_cpu = torch.from_numpy(vox).unsqueeze(0)
-            patches_cpu = patchify_batch(vox_t_cpu, patch).squeeze(0).numpy()  # (N, D)
+            patches_cpu = patchify_batch(vox_t_cpu, patch).squeeze(0).numpy()
             p3 = patch ** 3
-            occ_per_patch = patches_cpu.reshape(N, n_vox_channels, p3).mean(axis=-1)  # (N, C)
-            pore_frac_per_patch = (patches_cpu == 0).mean(axis=-1)                     # (N,)
+            occ_per_patch = patches_cpu.reshape(N, n_vox_channels, p3).mean(axis=-1)
+            pore_frac_per_patch = (patches_cpu == 0).mean(axis=-1)
 
             corr_res = saliency_occupancy_correlation(
                 sal_n, occ_per_patch, pore_frac_per_patch)
 
-            # Store per-channel saliency means for group-level bar chart
-            sal_ch_mean = sal_ch.mean(dim=0).numpy()  # (C,)
+            sal_ch_mean = sal_ch.mean(dim=0).numpy()
             for ci, chname in enumerate(vox_channels):
                 ch_sal_store[group_label][chname].append(float(sal_ch_mean[ci]))
 
             for chname in vox_channels + ["pore_fraction"]:
                 corr_store[group_label][chname].append(corr_res[chname]["r"])
 
-            # ── save NPZ ───────────────────────────────────────────────────
             stem = _stem(Path(fname).name)
             np.savez_compressed(
                 group_dir / f"{stem}_attribution.npz",
@@ -794,13 +651,12 @@ def run(args):
                 rollout_3d=rollout_3d,
                 saliency_N=sal_n,
                 rollout_N=rollout_n,
-                sal_per_channel=sal_ch.numpy(),    # (N, C)
-                occ_per_patch=occ_per_patch,        # (N, C)
+                sal_per_channel=sal_ch.numpy(),
+                occ_per_patch=occ_per_patch,
                 pore_frac_per_patch=pore_frac_per_patch,
                 channel_names=np.array(vox_channels, dtype=object)
             )
 
-            # ── projection figures ─────────────────────────────────────────
             plot_saliency_projections(
                 sal_3d, f"Gradient saliency – {group_label} – {stem}",
                 group_dir / f"{stem}_saliency_proj.png")
@@ -808,7 +664,6 @@ def run(args):
                 rollout_3d, f"Attention rollout – {group_label} – {stem}",
                 group_dir / f"{stem}_rollout_proj.png", cmap="viridis")
 
-            # ── statistics ────────────────────────────────────────────────
             sparsity = float(np.mean(vox == 0))
             sal_entropy = float(
                 -np.sum((sal_n / (sal_n.sum() + 1e-10)) *
@@ -844,9 +699,6 @@ def run(args):
         print("[Warning] No attributions computed. Check voxel file paths.")
         return
 
-    # ── Group-level figures ───────────────────────────────────────────────────
-
-    # 1. Per-channel saliency bar chart
     ch_stats_best  = {c: {"mean": np.mean(ch_sal_store["best"][c]),
                           "sem":  np.std(ch_sal_store["best"][c]) / max(1, len(ch_sal_store["best"][c])**0.5)}
                       for c in vox_channels}
@@ -857,7 +709,6 @@ def run(args):
                                 out_dir / "channel_saliency_bars.png")
     print("[Saved] channel_saliency_bars.png")
 
-    # 2. Saliency-occupancy heatmap
     corr_mean_best  = {c: {"r": np.mean(corr_store["best"][c]),
                            "p": stats.ttest_1samp(corr_store["best"][c], 0).pvalue}
                        for c in vox_channels + ["pore_fraction"]}
@@ -868,14 +719,12 @@ def run(args):
                                      out_dir / "saliency_occupancy_heatmap.png")
     print("[Saved] saliency_occupancy_heatmap.png")
 
-    # 3. Rollout concentration comparison
     best_roll_conc  = results_df.loc[results_df.group=="best",  "rollout_max_mean"].values
     worst_roll_conc = results_df.loc[results_df.group=="worst", "rollout_max_mean"].values
     plot_rollout_comparison(best_roll_conc, worst_roll_conc,
                              out_dir / "rollout_concentration.png")
     print("[Saved] rollout_concentration.png")
 
-    # 4. Standard group comparisons
     for metric, ylabel, title in [
         ("saliency_gini",     "Gini coefficient",      "Saliency spatial concentration"),
         ("sal_weighted_dist", "Weighted distance (patches)", "Saliency centre-of-mass"),
@@ -889,18 +738,15 @@ def run(args):
                                   out_dir / f"group_comparison_{metric}.png",
                                   ylabel=ylabel, title=title)
 
-    # 5. Sparsity scatter
     plot_saliency_sparsity_scatter(
         results_df["voxel_sparsity"].values,
         results_df["saliency_entropy"].values,
         results_df["abs_residual"].values,
         out_dir / "saliency_sparsity_scatter.png")
 
-    # 6. Summary panel (paper-ready)
     plot_summary_panel(results_df, ch_stats_best, ch_stats_worst,
                        corr_mean_best, corr_mean_worst, out_dir)
 
-    # ── Linear probing (fixed) ────────────────────────────────────────────────
     print("\n[Linear probing] collecting embeddings...")
     all_embeds, probe_targets = [], {
         "voxel_sparsity": [],
@@ -935,12 +781,10 @@ def run(args):
     ])
     probe_df.to_csv(out_dir / "linear_probe_results.csv", index=False)
 
-    # ── Print reviewer-ready summary ──────────────────────────────────────────
     print("\n" + "="*65)
     print("REVIEWER-READY SUMMARY")
     print("="*65)
 
-    # DB source breakdown
     results_df["db"] = results_df["filename"].str.extract(r"^(DB\d+)")
     print("\n1) Database source of worst-predicted structures:")
     print(results_df[results_df.group=="worst"].groupby("db").size().to_string())
@@ -970,10 +814,8 @@ def run(args):
 
     print(f"\n[Complete] All outputs in: {out_dir.resolve()}")
 
-    # ── Extended error analysis for reviewer response ─────────────────────────
     print("\n[Extended error analysis] Building reviewer-response figures...")
 
-    # Build rich per-structure feature table from saved NPZs
     ext_records = []
     for group_label in ["best", "worst"]:
         group_dir = out_dir / group_label
@@ -995,7 +837,6 @@ def run(args):
 
             feats = compute_saliency_features(sal_n, roll_n, sal_3d)
 
-            # Saliency-occupancy correlation (if channel data available)
             corr_pore = np.nan
             if occ is not None and pore is not None:
                 try:
@@ -1014,7 +855,6 @@ def run(args):
                 **feats,
             })
 
-    # Fall back to v1 NPZs if v2 columns are absent (no sal_per_channel)
     if len(ext_records) == 0:
         for group_label in ["best", "worst"]:
             group_dir = out_dir / group_label
@@ -1049,11 +889,9 @@ def run(args):
         print("[Warning] Could not build extended feature table.")
         return
 
-    # Collect saliency arrays for consensus maps
     best_sal_arrays  = [np.load(p)["saliency_N"] for p in sorted((out_dir/"best").glob("*_attribution.npz"))]
     worst_sal_arrays = [np.load(p)["saliency_N"] for p in sorted((out_dir/"worst").glob("*_attribution.npz"))]
 
-    # Generate all extended figures
     plot_consensus_saliency_maps(best_sal_arrays, worst_sal_arrays, n_side,
                                   out_dir / "consensus_saliency_maps.png")
     print("[Saved] consensus_saliency_maps.png")
@@ -1076,7 +914,6 @@ def run(args):
     plot_prediction_bias_detailed(ext_df, out_dir / "prediction_bias_detailed.png")
     print("[Saved] prediction_bias_detailed.png")
 
-    # Print the full reviewer response text
     probe_res = {}
     if (out_dir / "linear_probe_results.csv").exists():
         pdf = pd.read_csv(out_dir / "linear_probe_results.csv")
@@ -1087,14 +924,7 @@ def run(args):
     print_reviewer_response_text(ext_df, probe_res, corr_b, corr_w)
 
 
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Extended error analysis (Reviewer responses)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def compute_saliency_features(sal_n, roll_n, sal_3d):
-    """Compute a rich set of attribution features for one structure."""
     N = len(sal_n)
     p = sal_n / (sal_n.sum() + 1e-10)
     entropy = float(-np.sum(p * np.log(p + 1e-10)))
@@ -1111,13 +941,11 @@ def compute_saliency_features(sal_n, roll_n, sal_3d):
     rp           = roll_n / (roll_n.sum() + 1e-10)
     roll_entropy = float(-np.sum(rp * np.log(rp + 1e-10)))
 
-    # Saliency-rollout agreement: do they agree on the top patches?
     top20_sal  = set(np.argsort(sal_n)[-20:])
     top20_roll = set(np.argsort(roll_n)[-20:])
     top20_overlap = len(top20_sal & top20_roll) / 20.0
     sal_roll_r = float(np.corrcoef(sal_n, roll_n)[0, 1])
 
-    # Spatial features from 3D map
     G = sal_3d.shape[0]
     shell = np.zeros((G,G,G), bool)
     shell[0]=shell[-1]=True; shell[:,0]=shell[:,-1]=True; shell[:,:,0]=shell[:,:,-1]=True
@@ -1147,11 +975,6 @@ def compute_saliency_features(sal_n, roll_n, sal_3d):
 
 
 def plot_saliency_confidence_scatter(df, outpath):
-    """
-    Scatter: gradient magnitude (model confidence proxy) vs prediction error.
-    Higher gradient = model is more sensitive to input = more confident region.
-    Shows whether model uncertainty correlates with prediction failure.
-    """
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     for ax, (xcol, xlabel) in zip(axes, [
@@ -1169,7 +992,6 @@ def plot_saliency_confidence_scatter(df, outpath):
         ax.set_title(f"r = {r:.3f}, p = {p:.3f}", fontsize=10)
         ax.grid(True, linestyle=":", linewidth=0.5)
 
-        # Best/worst group labels
         for _, row in df.iterrows():
             col = "#4C72B0" if row["group"] == "best" else "#DD8452"
             ax.annotate("", xy=(row[xcol], row["abs_residual"]),
@@ -1189,14 +1011,8 @@ def plot_saliency_confidence_scatter(df, outpath):
 
 
 def plot_k80_distribution(df, outpath):
-    """
-    How many patches carry 80% of the saliency signal?
-    A focused model uses few patches; diffuse model uses many.
-    Key for reviewer: shows WHERE prediction confidence comes from.
-    """
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Left: violin of k80 by group
     ax = axes[0]
     bv = df[df.group=="best"]["k80_patches"].values
     wv = df[df.group=="worst"]["k80_patches"].values
@@ -1218,7 +1034,6 @@ def plot_k80_distribution(df, outpath):
                     fontsize=8, color=col,
                     arrowprops=dict(arrowstyle="-", color=col, lw=0.7))
 
-    # Right: k80 vs target uptake colored by group
     ax = axes[1]
     for grp, col, label in [("best","#4C72B0","Best"),("worst","#DD8452","Worst")]:
         sub = df[df.group==grp]
@@ -1237,14 +1052,9 @@ def plot_k80_distribution(df, outpath):
 
 
 def plot_consensus_saliency_maps(best_sal_arrays, worst_sal_arrays, n_side, outpath):
-    """
-    Mean saliency map across all best/worst structures — the group-level
-    'attention fingerprint'. Shows which 3D regions the model systematically
-    attends to for each prediction quality tier.
-    """
     mean_best  = np.stack(best_sal_arrays).mean(0).reshape(n_side, n_side, n_side)
     mean_worst = np.stack(worst_sal_arrays).mean(0).reshape(n_side, n_side, n_side)
-    diff = mean_best - mean_worst   # positive = best attends more here
+    diff = mean_best - mean_worst
 
     fig, axes = plt.subplots(3, 3, figsize=(13, 10))
     titles_rows = ["Best predicted (consensus)", "Worst predicted (consensus)", "Difference (Best − Worst)"]
@@ -1277,14 +1087,8 @@ def plot_consensus_saliency_maps(best_sal_arrays, worst_sal_arrays, n_side, outp
 
 
 def plot_saliency_rollout_agreement(df, outpath):
-    """
-    Saliency (gradient) vs rollout (attention) agreement.
-    Low agreement = model uses gradient pathways different from attention flow.
-    This directly addresses the reviewer's comment about internal representation.
-    """
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # Left: correlation scatter
     ax = axes[0]
     for grp, col in [("best","#4C72B0"),("worst","#DD8452")]:
         sub = df[df.group==grp]
@@ -1298,7 +1102,6 @@ def plot_saliency_rollout_agreement(df, outpath):
     ax.legend(fontsize=9)
     ax.grid(True, linestyle=":", linewidth=0.5)
 
-    # Right: violin of sal_roll_r by group
     ax = axes[1]
     bv = df[df.group=="best"]["sal_roll_r"].values
     wv = df[df.group=="worst"]["sal_roll_r"].values
@@ -1325,11 +1128,6 @@ def plot_saliency_rollout_agreement(df, outpath):
 
 
 def plot_structural_vs_attribution(df, outpath):
-    """
-    Multi-panel figure showing how structural properties (sparsity, target uptake)
-    relate to attribution features. This directly addresses reviewer comment 2:
-    'the internal representation learned by the model is not investigated'.
-    """
     fig, axes = plt.subplots(2, 3, figsize=(15, 9))
 
     pairs = [
@@ -1361,11 +1159,6 @@ def plot_structural_vs_attribution(df, outpath):
 
 
 def plot_db_source_attribution(df, outpath):
-    """
-    Attribution features broken down by database source.
-    Shows that DB1 Cu/Zn MOFs have systematically different attribution
-    patterns — explaining why they are consistently worst-predicted.
-    """
     df2 = df.copy()
     df2["db"] = df2["filename"].str.extract(r"^(DB\d+)")
 
@@ -1407,11 +1200,6 @@ def plot_db_source_attribution(df, outpath):
 
 
 def plot_prediction_bias_detailed(df, outpath):
-    """
-    Detailed prediction bias: residual vs target, DB-stratified,
-    with saliency entropy encoded as point size.
-    Most comprehensive single figure for addressing both reviewer comments.
-    """
     df2 = df.copy()
     df2["db"] = df2["filename"].str.extract(r"^(DB\d+)")
     df2["residual"] = df2["prediction"] - df2["target"]
@@ -1421,7 +1209,6 @@ def plot_prediction_bias_detailed(df, outpath):
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
-    # Panel 1: Residual vs target
     ax = axes[0]
     for db, grp in df2.groupby("db"):
         sz = 30 + 300*(grp["sal_entropy"] - df2["sal_entropy"].min()) / (df2["sal_entropy"].max() - df2["sal_entropy"].min() + 1e-10)
@@ -1435,7 +1222,6 @@ def plot_prediction_bias_detailed(df, outpath):
     ax.legend(fontsize=8, framealpha=0.8)
     ax.grid(True, linestyle=":", linewidth=0.5)
 
-    # Panel 2: Parity plot with saliency entropy colour
     ax = axes[1]
     sc = ax.scatter(df2["target"], df2["prediction"],
                     c=df2["sal_entropy"], cmap="plasma", s=50, alpha=0.8,
@@ -1449,7 +1235,6 @@ def plot_prediction_bias_detailed(df, outpath):
     ax.set_title("Parity plot coloured by saliency entropy", fontsize=10)
     ax.grid(True, linestyle=":", linewidth=0.5)
 
-    # Panel 3: Gradient magnitude vs residual magnitude
     ax = axes[2]
     sc = ax.scatter(df2["sal_max"], df2["abs_residual"],
                     c=df2["target"], cmap="viridis", s=50, alpha=0.8,
@@ -1468,7 +1253,6 @@ def plot_prediction_bias_detailed(df, outpath):
 
 
 def print_reviewer_response_text(results_df, probe_results, corr_mean_best, corr_mean_worst):
-    """Print a structured, detailed reviewer response to stdout."""
     sep = "="*70
     print(f"\n{sep}")
     print("DETAILED REVIEWER RESPONSE — ATTRIBUTION ANALYSIS")
@@ -1487,7 +1271,6 @@ potentially uncovering physically meaningful adsorption motifs."
     print("OUR RESPONSE (data-driven):")
     print()
 
-    # Saliency-occupancy
     vox_ch = ["total","metal","organic","C","O","N","H","charge","pore_fraction"]
     print("  1a. WHAT THE MODEL ATTENDS TO (saliency-occupancy correlation):")
     for ch in vox_ch:
@@ -1592,10 +1375,6 @@ OUR RESPONSE (data-driven):
     print(sep)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint",       required=True)
@@ -1615,4 +1394,3 @@ if __name__ == "__main__":
     p.add_argument("--ft-hidden",        type=int, default=256)
     args = p.parse_args()
     run(args)
-
